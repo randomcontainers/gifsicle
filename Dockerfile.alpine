@@ -1,0 +1,106 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=alpine:3.24
+
+FROM ${BASE_IMAGE} AS build
+SHELL ["/bin/ash", "-euo", "pipefail", "-c"]
+RUN apk add --no-cache \
+      autoconf \
+      automake \
+      build-base \
+      ca-certificates \
+      git \
+      perl \
+      scanelf
+
+# The tarballs on lcdf.org come without checksums or signatures and Gifsicle
+# has no GitHub releases, so the release tag is cloned and must point to the
+# commit pinned in package.yml.
+ARG VERSION
+ARG SOURCE_COMMIT
+RUN printf '%s\n' "${VERSION}" | grep -Eqx '[0-9]+\.[0-9]+(\.[0-9]+)?' \
+      || { echo "unexpected VERSION: ${VERSION}" >&2; exit 1; }; \
+    printf '%s\n' "${SOURCE_COMMIT}" | grep -Eqx '[0-9a-f]{40}' \
+      || { echo "SOURCE_COMMIT must be a full commit id" >&2; exit 1; }; \
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch "v${VERSION}" \
+      https://github.com/kohler/gifsicle.git /src/gifsicle; \
+    test "$(git -C /src/gifsicle rev-parse HEAD)" = "${SOURCE_COMMIT}" \
+      || { echo "tag v${VERSION} is not commit ${SOURCE_COMMIT}" >&2; exit 1; }
+WORKDIR /src/gifsicle
+ARG JOBS
+# The git tree has no configure script, so autoreconf writes it. gifview is an
+# X11 viewer and is not built. configure prints no summary, so config.h is
+# checked instead: no X11, threads for --threads, the vector code, and the C
+# library's strerror rather than the replacement in src/strerror.c, which has
+# no license notice. make check runs upstream's tests, a Perl script.
+RUN set -- \
+      --prefix=/usr/local \
+      --disable-gifview; \
+    autoreconf -fi; \
+    ./configure "$@"; \
+    echo "configure: $*" > /tmp/configure-options; \
+    for d in X_DISPLAY_MISSING ENABLE_THREADS HAVE_SIMD HAVE_STRERROR; do \
+      grep -qx "#define ${d} 1" config.h || { echo "config.h does not define ${d}" >&2; exit 1; }; \
+    done; \
+    make -j"${JOBS:-$(nproc)}"; \
+    make check; \
+    make install-strip DESTDIR=/out
+
+ARG BASE_IMAGE
+# The programs are checked and the man pages removed. Gifsicle's COPYING holds
+# the GPL-2.0 text. CLP, the command line parser in both programs, may also be
+# used under the Click license; its notice is copied from src/clp.c.
+# runtime-deps lists the so: names the programs need, plus the packages in
+# runtime-deps.alpine.
+RUN --mount=type=bind,source=runtime-deps.alpine,target=/tmp/runtime-deps.extra \
+    set -eu; \
+    usr=/out/usr/local; \
+    "$usr/bin/gifsicle" --version > /tmp/gifsicle-version; \
+    grep -Fqx "LCDF Gifsicle ${VERSION}" /tmp/gifsicle-version || { cat /tmp/gifsicle-version >&2; exit 1; }; \
+    "$usr/bin/gifdiff" --version > /tmp/gifdiff-version; \
+    grep -Fqx "gifdiff (LCDF Gifsicle) ${VERSION}" /tmp/gifdiff-version || { cat /tmp/gifdiff-version >&2; exit 1; }; \
+    rm -rf "$usr/share/man"; \
+    for f in "$usr"/bin/*; do echo "${f##*/}"; done | LC_ALL=C sort | tr '\n' ' ' > /tmp/programs; \
+    test "$(cat /tmp/programs)" = 'gifdiff gifsicle ' || { cat /tmp/programs >&2; exit 1; }; \
+    meta="$usr/share/randomcontainers/gifsicle"; \
+    mkdir -p "$meta/licenses"; \
+    cp COPYING "$meta/licenses/COPYING"; \
+    grep -q 'GNU GENERAL PUBLIC LICENSE' "$meta/licenses/COPYING"; \
+    awk '/\/\*/ { c = 1; b = "" } c { b = b $0 "\n" } c && /\*\// { c = 0; if (b ~ /Click LICENSE/) { printf "%s", b; exit } }' \
+      src/clp.c > "$meta/licenses/NOTICE.clp"; \
+    test -s "$meta/licenses/NOTICE.clp" || { echo "no notice in src/clp.c" >&2; exit 1; }; \
+    echo "${VERSION}" > "$meta/version"; \
+    printf '%s\n' \
+      "https://github.com/kohler/gifsicle.git@${SOURCE_COMMIT}" \
+      "https://github.com/kohler/gifsicle/tree/${SOURCE_COMMIT}" \
+      "https://github.com/randomcontainers/gifsicle/releases/tag/v${VERSION}" \
+      > "$meta/source"; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "compiler: $(cc --version | sed -n 1p)"; \
+      echo "commit: ${SOURCE_COMMIT}"; \
+      cat /tmp/configure-options; \
+      grep -E '^#define (X_DISPLAY_MISSING|ENABLE_THREADS|HAVE_SIMD|HAVE_VECTOR_SIZE_VECTOR_TYPES|HAVE_EXT_VECTOR_TYPE_VECTOR_TYPES) ' config.h; \
+      sed -n 1p /tmp/gifsicle-version; \
+    } > "$meta/buildinfo"; \
+    scanelf --needed --nobanner --format '%n#p' --recursive "$usr" | tr ',' '\n' | LC_ALL=C sort -u > /tmp/needed; \
+    while read -r so; do \
+      if [ -n "$so" ] && [ -z "$(find /out -name "$so" -print -quit)" ]; then echo "so:$so"; fi; \
+    done < /tmp/needed > /tmp/elf-deps; \
+    test -s /tmp/elf-deps; \
+    LC_ALL=C sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+RUN --mount=type=bind,from=build,source=/out/usr/local/share/randomcontainers/gifsicle/runtime-deps,target=/tmp/runtime-deps \
+    set -eu; \
+    xargs apk add --no-cache ca-certificates tini < /tmp/runtime-deps; \
+    addgroup -g 1000 app; \
+    adduser -D -u 1000 -G app app; \
+    install -d -m 1777 /work /cache
+COPY --link --from=build /out/usr/local/ /usr/local/
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "gifsicle"]
+CMD ["--help"]
