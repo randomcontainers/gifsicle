@@ -1,0 +1,158 @@
+name: gifsicle
+title: Gifsicle
+summary: Optimizes, edits and inspects GIF animations, with lossless and lossy compression, color reduction, resizing and frame editing, and gifdiff to compare GIFs.
+homepage: https://www.lcdf.org/gifsicle/
+# Gifsicle, gifdiff and the LCDF GIF library are GPL-2.0-only, with an
+# alternative license in upstream's README. CLP, the command line parser
+# compiled into both programs, may be used under GPL-2.0 or the Click license.
+# The image takes all of it under GPL-2.0 and keeps CLP's notice.
+license: GPL-2.0-only
+source-release: true
+upstream:
+  source: github-tag
+  repository: kohler/gifsicle
+  # Release tags look like v1.98. A point release such as v1.98.1 (there are
+  # old ones, v1.11.1 and v1.14.1) is built too; beta tags such as v1.15b
+  # are not.
+  tag-pattern: '^v(\d+\.\d+(?:\.\d+)?)$'
+  version-template: '{1}'
+  versioning: semver
+  version: "1.98"
+  # The tarballs on lcdf.org have no checksums or signatures and the project
+  # publishes no GitHub releases, so the build clones the tag, which is
+  # lightweight, and checks its commit.
+  git:
+    url: https://github.com/kohler/gifsicle.git
+    tag: v{version}
+    commit: 8ff3057b736141b406be621830b851fdf4285689
+image:
+  entrypoint: [gifsicle]
+  cmd: [--help]
+test:
+  - |
+    gifsicle --version > version.txt
+    got="$(sed -n 1p version.txt)"
+    test "$got" = "LCDF Gifsicle $VERSION" || { echo "expected LCDF Gifsicle $VERSION, got: $got" >&2; exit 1; }
+    gifdiff --version > gifdiff-version.txt
+    got="$(sed -n 1p gifdiff-version.txt)"
+    test "$got" = "gifdiff (LCDF Gifsicle) $VERSION" || { echo "expected gifdiff (LCDF Gifsicle) $VERSION, got: $got" >&2; exit 1; }
+    # gifview is an X11 viewer and is not built.
+    if command -v gifview > /dev/null; then echo 'unexpected: gifview' >&2; exit 1; fi
+    # --help lists --threads only with thread support and --gamma only with pow().
+    gifsicle --help > help.txt
+    for opt in --threads --gamma --lossy; do
+      grep -Fq -- "$opt" help.txt || { echo "gifsicle --help does not list $opt:" >&2; cat help.txt >&2; exit 1; }
+    done
+  - |
+    expect() {
+      f="$1"; shift
+      gifsicle --info "$f" > "$f.info"
+      for line in "$@"; do
+        grep -Fqx -- "$line" "$f.info" || { echo "expected \"$line\" in the --info of $f:" >&2; cat "$f.info" >&2; exit 1; }
+      done
+    }
+    # A 1x1 GIF: one white pixel, with white and black in the global color table.
+    printf '%s' 'R0lGODlhAQABAIAAAP///wAAACwAAAAAAQABAAACAkQBADs=' | base64 -d > pixel.gif
+    expect pixel.gif '* pixel.gif 1 image' '  logical screen 1x1' '  global color table [2]'
+    gifsicle --resize 32x32 pixel.gif -o white.gif
+    gifsicle --change-color '#ffffff' '#ff0000' white.gif -o red.gif
+    gifsicle --color-info red.gif > red.colors
+    grep -Fq ': #FF0000' red.colors || { echo 'red.gif has no #FF0000:' >&2; cat red.colors >&2; exit 1; }
+    if grep -Fq ': #FFFFFF' red.colors; then echo 'red.gif still has #FFFFFF:' >&2; cat red.colors >&2; exit 1; fi
+    gifsicle --delay 10 --loopcount=forever white.gif red.gif white.gif -o anim.gif
+    expect anim.gif '* anim.gif 3 images' '  logical screen 32x32' '  loop forever'
+    delays="$(grep -c ' delay 0\.10s$' anim.gif.info || true)"
+    [ "$delays" = 3 ] || { echo 'expected 3 frames with a delay of 0.10s:' >&2; cat anim.gif.info >&2; exit 1; }
+  - |
+    # gifdiff exits with 0 when two GIFs look the same, 1 when they differ and
+    # 2 on errors.
+    gifsicle -O3 anim.gif -o opt.gif
+    gifdiff anim.gif opt.gif > same.txt || { echo 'gifdiff: anim.gif and opt.gif differ' >&2; cat same.txt >&2; exit 1; }
+    status=0
+    gifdiff white.gif red.gif > differ.txt || status=$?
+    [ "$status" -eq 1 ] || { echo "gifdiff white.gif red.gif: expected status 1, got $status" >&2; cat differ.txt >&2; exit 1; }
+    grep -Fq 'pixels differ' differ.txt || { cat differ.txt >&2; exit 1; }
+    # Reducing three colors to two maps the light gray frame to white or the
+    # white frame to light gray, so the result no longer matches the input.
+    gifsicle --change-color '#ffffff' '#eeeeee' white.gif -o gray.gif
+    gifsicle white.gif red.gif gray.gif -o three.gif
+    gifsicle -O3 --colors 2 three.gif -o two.gif
+    gifsicle --info two.gif > two.info
+    for line in '* two.gif 3 images' '  global color table [2]'; do
+      grep -Fqx -- "$line" two.info || { echo "expected \"$line\" in the --info of two.gif:" >&2; cat two.info >&2; exit 1; }
+    done
+    status=0
+    gifdiff three.gif two.gif > reduced.txt || status=$?
+    [ "$status" -eq 1 ] || { echo "gifdiff three.gif two.gif: expected status 1, got $status" >&2; cat reduced.txt >&2; exit 1; }
+    # 32x32 noise of black and #040404 pixels, which look the same. --lossy
+    # may store one in place of the other, so the file gets smaller and some
+    # pixels change.
+    printf '%s' 'R0lGODlhIAAgAIAAAAAAAAQEBCwAAAAAIAAgAAACsQxuEJmo3w5i8MllqFQ491hN3vZl0FKhlmeinTiynGuKF+Oe3OTUG4+x7CKyU5B07LVWQ+HwJaypVDNq40qNVneX7YxJfH543GezlaOBj1dl95ZU0mSU9DmWIgF7Dqbe2UWUpPZjBMWVA7NS5wSCk/XFCGM3OffmNrm4ZPeiUcQnZUQ2yKe4ibPl84haOHJZOtUYwxbkE4hVdnMWVStWqgnKW9eZawUZHNqrykJcu/pRAAA7' | base64 -d > noise.gif
+    gifsicle -O3 noise.gif -o noise-exact.gif
+    gifsicle -O3 --lossy=80 noise.gif -o noise-lossy.gif
+    exact="$(wc -c < noise-exact.gif | tr -d ' ')"
+    lossy="$(wc -c < noise-lossy.gif | tr -d ' ')"
+    [ "$lossy" -lt "$exact" ] || { echo "expected --lossy=80 to shrink noise.gif: $lossy bytes with it, $exact without" >&2; exit 1; }
+    status=0
+    gifdiff noise-exact.gif noise-lossy.gif > lossy.txt || status=$?
+    [ "$status" -eq 1 ] || { echo "gifdiff noise-exact.gif noise-lossy.gif: expected status 1, got $status" >&2; head -n 5 lossy.txt >&2; exit 1; }
+  - |
+    expect() {
+      f="$1"; shift
+      gifsicle --info "$f" > "$f.info"
+      for line in "$@"; do
+        grep -Fqx -- "$line" "$f.info" || { echo "expected \"$line\" in the --info of $f:" >&2; cat "$f.info" >&2; exit 1; }
+      done
+    }
+    gifsicle anim.gif '#1' -o second.gif
+    expect second.gif '* second.gif 1 image' '  logical screen 32x32'
+    gifsicle --explode anim.gif -o frame
+    for n in 000 001 002; do
+      expect "frame.$n" "* frame.$n 1 image" '  logical screen 32x32'
+    done
+    # --threads resizes the frames of an unoptimized GIF in parallel. Other
+    # GIFs fall back to one thread with a warning.
+    gifsicle --threads=2 --resize 16x16 anim.gif -o half.gif 2> threads.err || { cat threads.err >&2; exit 1; }
+    if grep -Fq multithreaded threads.err; then cat threads.err >&2; exit 1; fi
+    expect half.gif '* half.gif 3 images' '  logical screen 16x16'
+    # Without file names, gifsicle reads standard input and writes standard output.
+    gifsicle -O2 < anim.gif > piped.gif
+    expect piped.gif '* piped.gif 3 images' '  loop forever'
+examples:
+  - title: Optimize a GIF animation losslessly
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/gifsicle -O3 input.gif -o output.gif
+  - title: Shrink an animation further with lossy compression and at most 64 colors
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/gifsicle -O3 --lossy=80 --colors 64 input.gif -o small.gif
+  - title: Resize an animation to 320 pixels wide
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/gifsicle --resize-width 320 input.gif -o resized.gif
+  - title: Show the frames, delays and color tables of a GIF
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/gifsicle --info --color-info input.gif
+  - title: Check that two GIFs look the same with gifdiff
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint gifdiff ghcr.io/randomcontainers/gifsicle input.gif output.gif
+  - title: Turn a video clip into an optimized GIF with FFmpeg (default image)
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint sh ghcr.io/randomcontainers/gifsicle -c 'ffmpeg -loglevel error -i clip.mp4 -vf "fps=10,scale=480:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" clip.gif && gifsicle -O3 --lossy=80 clip.gif -o clip-small.gif'
+combos:
+  - with: [ffmpeg]
+    default: true
+    base: ffmpeg
+    summary: Gifsicle with FFmpeg, for turning video clips into GIF animations and then optimizing them.
+    test:
+      - |
+        ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=160x120:rate=10:duration=2 \
+          -filter_complex '[0:v]split[a][b];[a]palettegen[p];[b][p]paletteuse' clip.gif
+        gifsicle --info clip.gif > clip.info
+        for line in '* clip.gif 20 images' '  logical screen 160x120' '  loop forever'; do
+          grep -Fqx -- "$line" clip.info || { echo "expected \"$line\" in:" >&2; cat clip.info >&2; exit 1; }
+        done
+        gifsicle -O3 clip.gif -o clip-opt.gif
+        gifdiff clip.gif clip-opt.gif > same.txt || { echo 'gifdiff: clip.gif and clip-opt.gif differ' >&2; head -n 20 same.txt >&2; exit 1; }
+        gifsicle -O3 --lossy=80 --colors 64 clip.gif -o small.gif
+        gifsicle --info small.gif > small.info
+        grep -Fqx '* small.gif 20 images' small.info || { cat small.info >&2; exit 1; }
+        before="$(wc -c < clip.gif | tr -d ' ')"
+        after="$(wc -c < small.gif | tr -d ' ')"
+        [ "$after" -lt "$before" ] || { echo "small.gif has $after bytes, clip.gif $before" >&2; exit 1; }
+        # FFmpeg reads the result back.
+        ffmpeg -hide_banner -loglevel error -i small.gif -frames:v 1 first.png
+        printf '\211PNG\r\n\032\n' > png-magic
+        head -c 8 first.png | cmp - png-magic
