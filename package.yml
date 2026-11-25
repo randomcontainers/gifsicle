@@ -17,14 +17,14 @@ upstream:
   tag-pattern: '^v(\d+\.\d+(?:\.\d+)?)$'
   version-template: '{1}'
   versioning: semver
-  version: "1.98"
+  version: "1.99"
   # The tarballs on lcdf.org have no checksums or signatures and the project
   # publishes no GitHub releases, so the build clones the tag, which is
   # lightweight, and checks its commit.
   git:
     url: https://github.com/kohler/gifsicle.git
     tag: v{version}
-    commit: 8ff3057b736141b406be621830b851fdf4285689
+    commit: ef938439fd48f88c31b5fe09440de8d428131ad6
 image:
   entrypoint: [gifsicle]
   cmd: [--help]
